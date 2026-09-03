@@ -18,6 +18,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
+import time
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -254,7 +255,12 @@ class BatchConsumer:
         self._consumer.subscribe([self._topic])
 
     def poll_batch(
-        self, max_messages: int, *, idle_polls: int = 3, poll_timeout: float = 1.0
+        self,
+        max_messages: int,
+        *,
+        idle_polls: int = 3,
+        poll_timeout: float = 1.0,
+        assignment_timeout: float = 15.0,
     ) -> tuple[list[ConsumedMessage], list[DeadLetterEnvelope]]:
         """Poll up to ``max_messages``.
 
@@ -266,10 +272,20 @@ class BatchConsumer:
         decoded: list[ConsumedMessage] = []
         poison: list[DeadLetterEnvelope] = []
         idle = 0
+        assignment_deadline = time.monotonic() + assignment_timeout
 
         while len(decoded) + len(poison) < max_messages and idle < idle_polls:
             message = self._consumer.poll(poll_timeout)
             if message is None:
+                # A freshly subscribed consumer can spend several seconds
+                # joining its group and receiving a partition assignment.
+                # Those empty polls say nothing about whether the topic is
+                # empty, so start the idle budget only after assignment.
+                if (
+                    not self._consumer.assignment()
+                    and time.monotonic() < assignment_deadline
+                ):
+                    continue
                 idle += 1
                 continue
             if message.error():
